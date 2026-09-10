@@ -1,62 +1,58 @@
 --8<-- "snippets/dt-enablement.md"
 
+# dtpay — Payment Observability Workshop
 
 !!! example ""
-    ![run codespace](img/framework_banner.png){ align=center ; } 
+    ![Workshop Banner](img/framework_banner.png){ align=center }
 
-## 📊 Project Goals
+## About this Workshop
 
+This hands-on workshop demonstrates how to use **Apache JMeter** and **Dynatrace** together to observe, analyze, and automate performance testing of the **dtpay** payment application — a Kubernetes-native Spring Boot + React demo app.
 
-??? tip "Framework Objective"
-    **Reduce complexity, remove friction, and increase adoption of the Dynatrace Platform.**
+You will progressively add deeper Dynatrace integration across four JMeter versions, from basic APM traces all the way to real-time Business Event streaming during a live load test.
 
-    The Dynatrace Enablement Framework is a structured set of tools and best practices designed to streamline the delivery, maintenance, and scaling of solutions across the Dynatrace Platform. The primary goal is to drive platform adoption by ensuring consistent training, comprehensive solution coverage, and operational efficiency.
-
-    Trainings are delivered as GitHub Codespaces—publicly accessible, environment-agnostic, and built to a defined set of standards for quality, repeatability, and team alignment.
-
-
-## <img src="https://cdn.bfldr.com/B686QPH3/at/w5hnjzb32k5wcrcxnwcx4ckg/Dynatrace_signet_RGB_HTML.svg?auto=webp&format=pngg" alt="DT logo" width="22"> Dynatrace Enablement Framework in a Nutshell
-
-
-The Dynatrace Enablement Framework simplifies the delivery of demos and hands-on trainings for the Dynatrace Platform. It provides a unified set of tools, templates, and best practices to ensure enablements are easy to create, run anywhere, and maintain over time.
-
-### ✅ Key Features
-
-- **GitHub-Hosted & Versioned**  
-  All trainings are managed in GitHub repositories, ensuring traceability and collaboration.
-
-- **Self-Service Documentation**  
-  Each repo includes its own MkDocs-powered documentation, published via GitHub Pages.
-
-- **Universal Base Image**  
-  A Docker image supports AMD/ARM architectures, GitHub Codespaces, VS Code Dev Containers, and containerized execution in any Ubuntu OS.
-
-- **Separation of Concerns**  
-  Modular design allows repo-specific logic without impacting the core framework.
-
-- **Automated Testing**  
-  GitHub Actions enable end-to-end integration tests for all trainings.
-
-- **Monitoring & Analytics**  
-  Usage and adoption are tracked with Dynatrace for continuous improvement.
-
-- **Rapid Training Creation**  
-  Templates and automation help trainers launch new enablement content quickly.
-
-- **Centralized Maintenance**  
-  The Codespaces Synchronizer tool keeps all repositories up to date with the latest framework changes.
+!!! info "Source Repository"
+    [:material-github: github.com/domuharahap/dynatrace-jmeter-enablement](https://github.com/domuharahap/dynatrace-jmeter-enablement)
 
 ---
 
+## What You'll Learn
 
-### 🤲 Benefits
-- Reduces complexity and friction for trainers and learners
-- Increases adoption and consistency
-- Scales across internal, partner, and customer enablement a Kubernetes cluster.
+By the end of this workshop you will be able to:
 
-### 📞 Support Policy 
---8<-- "snippets/disclaimer.md"
+- [x] Deploy **dtpay**, a Kubernetes-native payment demo app, and explore its architecture
+- [x] Run **JMeter load tests** as Kubernetes Jobs with zero local setup
+- [x] View distributed traces and APM data for load-test traffic in **Dynatrace**
+- [x] Tag load-test traffic with `x-dynatrace-test` headers to **isolate test vs. real-user traffic**
+- [x] Publish **BizEvents** at test start and end with full performance summary stats
+- [x] Stream **live incremental BizEvents** every 30 seconds for a real-time Dynatrace dashboard
+
+---
+
+## JMeter Versions at a Glance
+
+| Version | Image | What's New |
+|---|---|---|
+| `v1.0` | `domuharahap/jmeter-tester:v1.0` | Basic load — results in DT APM traces |
+| `v1.2` | `domuharahap/jmeter-tester:v1.2` | Adds `x-dynatrace-test` header for test marking |
+| `v1.3` | `domuharahap/jmeter-tester:v1.3` | BizEvents at test start and end with summary stats |
+| `v2.0` | `domuharahap/jmeter-tester:v2.0` | v1.3 + live stats BizEvent every 30 s & extended scenarios |
+
+---
+
+## Workshop Structure
+
+| Section | Content |
+|---|---|
+| [Getting Started](getting-started.md) | Prerequisites, Codespace launch, port visibility, deploy dtpay |
+| [dtpay — Payment App](dtpay.md) | Architecture, Kubernetes resources, nginx proxy config |
+| [Part 1 — Basic APM Traces](jmeter-v1.0.md) | JMeter v1.0: baseline load test, DT distributed traces |
+| [Part 2 — Test Marking](jmeter-v1.2.md) | JMeter v1.2: `x-dynatrace-test` header, Request Attributes |
+| [Part 3 — BizEvents](jmeter-v1.3.md) | JMeter v1.3: test start & summary BizEvents, DQL |
+| [Part 4 — Live Stats](jmeter-v2.0.md) | JMeter v2.0: rolling stats every 30 s, real-time dashboard |
+| [Cleanup](cleanup.md) | Stop tests and remove workshop resources |
+| [Resources](resources.md) | Reference links and further reading |
 
 <div class="grid cards" markdown>
-- [Yes! let's begin :octicons-arrow-right-24:](container-image.md)
+- [Let's get started :octicons-arrow-right-24:](getting-started.md)
 </div>
