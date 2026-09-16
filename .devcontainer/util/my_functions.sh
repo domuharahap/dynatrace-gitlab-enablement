@@ -1,9 +1,18 @@
 #!/bin/bash
 # ======================================================================
 #          ------- Custom Functions -------                            #
-#  Space for adding custom functions so each repo can customize as.    # 
+#  Space for adding custom functions so each repo can customize as.    #
 #  needed.                                                             #
 # ======================================================================
+
+# Shared defaults — matches the ace-box roles and source repo
+GITLAB_NAMESPACE="${GITLAB_NAMESPACE:-gitlab}"
+GITLAB_CHART_VERSION="${GITLAB_CHART_VERSION:-9.4.0}"
+GITLAB_ROOT_USER="${GITLAB_ROOT_USER:-root}"
+GITLAB_GROUP_OTEL="${GITLAB_GROUP_OTEL:-Otel-App}"
+GITLAB_GROUP_SUPPORT="${GITLAB_GROUP_SUPPORT:-Support}"
+
+MIGRATE_DIR="${MIGRATE_DIR:-$REPO_PATH/.devcontainer/migrate}"
 
 customFunction(){
   printInfoSection "This is a custom function that calculates 1 + 1"
@@ -124,6 +133,256 @@ stopJmeterTest() {
   printInfoSection "Stopping JMeter test"
   kubectl delete job jmeter-tester -n jmeter 2>/dev/null || true
   kubectl delete ns jmeter --force 2>/dev/null || true
+}
+
+# ----------------------------------------------------------------------
+# GitLab — install via official helm chart on sslip.io magic domain
+# ----------------------------------------------------------------------
+installGitlab(){
+  printInfoSection "Installing GitLab (helm chart $GITLAB_CHART_VERSION) in namespace '$GITLAB_NAMESPACE'"
+
+  local ip domain root_password
+  ip=$(detectIP)
+  domain="${ip}.${MAGIC_DOMAIN:-sslip.io}"
+
+  kubectl create namespace "$GITLAB_NAMESPACE" 2>/dev/null || true
+
+  # Generate root password once, persist as k8s secret so reruns reuse it
+  if kubectl -n "$GITLAB_NAMESPACE" get secret ace-gitlab-initial-root-password &>/dev/null; then
+    root_password=$(kubectl -n "$GITLAB_NAMESPACE" get secret ace-gitlab-initial-root-password \
+      -o jsonpath='{.data.password}' | base64 -d)
+    printInfo "Reusing existing gitlab root password"
+  else
+    root_password=$(head -c 18 /dev/urandom | base64 | tr -d '/+=' | head -c 24)
+    kubectl -n "$GITLAB_NAMESPACE" create secret generic ace-gitlab-initial-root-password \
+      --from-literal="username=$GITLAB_ROOT_USER" \
+      --from-literal="password=$root_password"
+    printInfo "Created gitlab root password secret"
+  fi
+
+  helm repo add gitlab https://charts.gitlab.io/ >/dev/null
+  helm repo update >/dev/null
+
+  printInfo "Installing gitlab — ingress domain: gitlab.${domain}"
+  helm upgrade --install gitlab gitlab/gitlab \
+    --namespace "$GITLAB_NAMESPACE" \
+    --version "$GITLAB_CHART_VERSION" \
+    --wait --timeout 30m \
+    --set "global.hosts.domain=${domain}" \
+    --set "global.hosts.https=false" \
+    --set "global.appConfig.initialDefaults.signupEnabled=false" \
+    --set "global.ingress.provider=nginx" \
+    --set "global.ingress.configureCertmanager=false" \
+    --set "global.ingress.class=nginx" \
+    --set "global.ingress.tls.enabled=false" \
+    --set "global.initialRootPassword.secret=ace-gitlab-initial-root-password" \
+    --set "global.initialRootPassword.key=password" \
+    --set "installCertmanager=false" \
+    --set "certmanager.install=false" \
+    --set "nginx-ingress.enabled=false" \
+    --set "gitlab-runner.rbac.create=true" \
+    --set "gitlab-runner.rbac.clusterWideAccess=true" \
+    --set "gitlab-runner.gitlabUrl=http://gitlab.${domain}"
+
+  local endpoint
+  endpoint=$(_gitlabInternalEndpoint)
+  printInfo "Waiting for gitlab API at ${endpoint}/api/v4/projects to respond"
+  local RETRY=0 RETRY_MAX=60 http_code=""
+  while [[ $RETRY -lt $RETRY_MAX ]]; do
+    http_code=$(curl -sk -o /dev/null -w '%{http_code}' "${endpoint}/api/v4/projects" 2>/dev/null || echo "000")
+    if [[ "$http_code" == "200" ]]; then
+      printInfo "GitLab API is up (HTTP $http_code)"
+      break
+    fi
+    RETRY=$((RETRY + 1))
+    printWarn "Retry: ${RETRY}/${RETRY_MAX} - Wait 10s for GitLab API (last HTTP $http_code) ..."
+    sleep 10
+  done
+  if [[ $RETRY -eq $RETRY_MAX ]]; then
+    printError "GitLab API at ${endpoint} did not respond with 200 within $((RETRY_MAX * 10))s"
+    return 1
+  fi
+
+  # Generate + persist a Personal Access Token for API/git operations
+  _gitlabEnsurePat
+  printInfo "GitLab available at: http://gitlab.${domain}"
+  printInfo "Root credentials: $GITLAB_ROOT_USER / $root_password"
+
+  # Wide-open RBAC like the source repo, so CI runners can do anything
+  kubectl create clusterrolebinding gitlab-cluster-admin \
+    --clusterrole=cluster-admin --group=system:serviceaccounts 2>/dev/null || true
+}
+
+uninstallGitlab(){
+  printInfoSection "Uninstalling GitLab"
+  helm uninstall gitlab -n "$GITLAB_NAMESPACE" 2>/dev/null || true
+  kubectl delete namespace "$GITLAB_NAMESPACE" 2>/dev/null || true
+}
+
+# ----------------------------------------------------------------------
+# GitLab — internal helpers (REST API + auth)
+# ----------------------------------------------------------------------
+_gitlabInternalEndpoint(){
+  # Host-reachable ingress URL — the ClusterIP from gitlab-webservice-default
+  # isn't routable from the dev container, so we use the sslip.io magic domain.
+  local ip
+  ip=$(detectIP)
+  echo "http://gitlab.${ip}.${MAGIC_DOMAIN:-sslip.io}"
+}
+
+_gitlabRootPassword(){
+  kubectl -n "$GITLAB_NAMESPACE" get secret ace-gitlab-initial-root-password \
+    -o jsonpath='{.data.password}' 2>/dev/null | base64 -d
+}
+
+_gitlabEnsurePat(){
+  # If PAT already exists in k8s, source it; otherwise create via OAuth -> PAT
+  if kubectl -n "$GITLAB_NAMESPACE" get secret ace-gitlab-root-pat &>/dev/null; then
+    GITLAB_PAT=$(kubectl -n "$GITLAB_NAMESPACE" get secret ace-gitlab-root-pat \
+      -o jsonpath='{.data.personalAccessToken}' | base64 -d)
+    printInfo "Reusing existing gitlab PAT"
+    return 0
+  fi
+
+  local endpoint password oauth_token pat
+  endpoint=$(_gitlabInternalEndpoint)
+  password=$(_gitlabRootPassword)
+
+  oauth_token=$(curl -sk -X POST "${endpoint}/oauth/token" \
+    -H "Content-Type: application/json" \
+    -d "{\"grant_type\":\"password\",\"username\":\"${GITLAB_ROOT_USER}\",\"password\":\"${password}\"}" \
+    | sed -n 's/.*"access_token":"\([^"]*\)".*/\1/p')
+
+  if [ -z "$oauth_token" ]; then
+    printError "Could not get GitLab OAuth token"
+    return 1
+  fi
+
+  pat=$(curl -sk -X POST "${endpoint}/api/v4/users/1/personal_access_tokens" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer ${oauth_token}" \
+    -d '{"name":"ace-box-pat","scopes":["api","read_api","read_user","read_repository","write_repository","sudo","admin_mode"]}' \
+    | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+
+  if [ -z "$pat" ]; then
+    printError "Could not create GitLab PAT"
+    return 1
+  fi
+
+  kubectl -n "$GITLAB_NAMESPACE" create secret generic ace-gitlab-root-pat \
+    --from-literal="personalAccessToken=$pat"
+  GITLAB_PAT="$pat"
+  printInfo "Created and persisted GitLab PAT"
+}
+
+_gitlabEnsureGroup(){
+  # Usage: _gitlabEnsureGroup <group_name>
+  # Echoes the group ID on stdout; logs go to stderr so callers can capture
+  # the ID cleanly via $(...).
+  local name="$1" endpoint id
+  endpoint=$(_gitlabInternalEndpoint)
+
+  id=$(curl -sk -H "Authorization: Bearer ${GITLAB_PAT}" \
+    "${endpoint}/api/v4/groups?search=$(printf %s "$name" | jq -sRr @uri)" \
+    | jq -r ".[] | select(.name==\"$name\") | .id" | head -n1)
+
+  if [ -z "$id" ] || [ "$id" = "null" ]; then
+    id=$(curl -sk -X POST "${endpoint}/api/v4/groups" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer ${GITLAB_PAT}" \
+      -d "{\"path\":\"$name\",\"name\":\"$name\",\"visibility\":\"public\"}" \
+      | jq -r '.id')
+    printInfo "Created group '$name' (id=$id)" >&2
+  else
+    printInfo "Group '$name' already exists (id=$id)" >&2
+  fi
+  echo "$id"
+}
+
+_gitlabEnsureProject(){
+  # Usage: _gitlabEnsureProject <project_name> <namespace_id>
+  # Echoes the project ID on stdout; logs go to stderr so callers can capture
+  # the ID cleanly via $(...).
+  local name="$1" ns_id="$2" endpoint id
+  endpoint=$(_gitlabInternalEndpoint)
+
+  id=$(curl -sk -H "Authorization: Bearer ${GITLAB_PAT}" \
+    "${endpoint}/api/v4/projects?search=$(printf %s "$name" | jq -sRr @uri)" \
+    | jq -r ".[] | select(.name==\"$name\") | select(.namespace.id==$ns_id) | .id" | head -n1)
+
+  if [ -z "$id" ] || [ "$id" = "null" ]; then
+    id=$(curl -sk -X POST "${endpoint}/api/v4/projects" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer ${GITLAB_PAT}" \
+      -d "{\"name\":\"$name\",\"namespace_id\":$ns_id,\"visibility\":\"public\"}" \
+      | jq -r '.id')
+    printInfo "  Created project '$name' (id=$id)" >&2
+  else
+    printInfo "  Project '$name' already exists (id=$id)" >&2
+  fi
+  echo "$id"
+}
+
+_gitlabPushRepo(){
+  # Usage: _gitlabPushRepo <local_dir> <group> <project_name> [branch]
+  local src="$1" group="$2" repo="$3" branch="${4:-main}"
+  local endpoint host password
+  endpoint=$(_gitlabInternalEndpoint)
+  host="${endpoint#http://}"
+  password=$(_gitlabRootPassword)
+
+  if [ ! -d "$src" ] || [ -z "$(ls -A "$src" 2>/dev/null)" ]; then
+    printWarn "  Skipping push for '$repo' — source dir '$src' empty/missing"
+    return 0
+  fi
+
+  ( cd "$src"
+    if [ ! -d .git ]; then
+      git init -q -b "$branch"
+      git config user.email "ace-box@local"
+      git config user.name  "ace-box"
+      git add .
+      git commit -q -m "Initial commit for branch $branch" || true
+    fi
+    git remote remove gitlab 2>/dev/null || true
+    git remote add gitlab "http://${GITLAB_ROOT_USER}:${password}@${host}/${group}/${repo}.git"
+    git push -q gitlab "$branch" 2>&1 | sed 's/^/    /' || \
+      printWarn "  Push of $repo failed (may already be populated)"
+  )
+}
+
+# ----------------------------------------------------------------------
+# GitLab — seed groups and push local repos
+# ----------------------------------------------------------------------
+seedGitlabRepos(){
+  printInfoSection "Seeding GitLab repositories from $MIGRATE_DIR"
+
+  if [ -z "$GITLAB_PAT" ]; then
+    _gitlabEnsurePat || return 1
+  fi
+
+  # Support group (3 repos: monaco, automated load test, manual release)
+  local support_id
+  support_id=$(_gitlabEnsureGroup "$GITLAB_GROUP_SUPPORT")
+  local s
+  for s in dynatrace_env_automation automated_load_test astroshop_release_repo; do
+    _gitlabEnsureProject "$s" "$support_id" >/dev/null
+    _gitlabPushRepo "$MIGRATE_DIR/support_repos/$s" "$GITLAB_GROUP_SUPPORT" "$s"
+  done
+
+  # Otel-App group (all astroshop service repos)
+  local otel_id
+  otel_id=$(_gitlabEnsureGroup "$GITLAB_GROUP_OTEL")
+  local r
+  for r in "$MIGRATE_DIR"/astroshop_repos/*/; do
+    [ -d "$r" ] || continue
+    local name
+    name=$(basename "$r")
+    _gitlabEnsureProject "$name" "$otel_id" >/dev/null
+    _gitlabPushRepo "$r" "$GITLAB_GROUP_OTEL" "$name"
+  done
+
+  printInfo "GitLab seeding complete"
 }
 
 
