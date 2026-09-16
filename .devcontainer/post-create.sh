@@ -11,11 +11,11 @@ startCluster
 installK9s
 
 # Dynatrace Operator is deployed automatically, secrets are read from the env.
-dynatraceDeployOperator
+#dynatraceDeployOperator
 
 # You can deploy CNFS (for CNFS use Kind) or AppOnly (use k3d)
 #deployCloudNative
-deployApplicationMonitoring
+#deployApplicationMonitoring
 
 # The TODO App will be deployed as a sample
 #deployTodoApp
