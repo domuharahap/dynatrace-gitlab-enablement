@@ -33,11 +33,13 @@
   },
   	// Use 'forwardPorts' to make a list of ports inside the container available locally.
 	"forwardPorts": [
-		80
+		80,
+		8929
 	],
 	// add labels
 	"portsAttributes": {
-		"80": { "label": "Ingress (Applications)" }
+		"80": { "label": "Ingress (Applications)" },
+		"8929": { "label": "GitLab" }
 	},
   // minimal CPU when running DT components and apps.
 	"hostRequirements": {

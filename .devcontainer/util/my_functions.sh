@@ -182,7 +182,15 @@ installGitlab(){
     --set "nginx-ingress.enabled=false" \
     --set "gitlab-runner.rbac.create=true" \
     --set "gitlab-runner.rbac.clusterWideAccess=true" \
-    --set "gitlab-runner.gitlabUrl=http://gitlab.${domain}"
+    --set "gitlab-runner.gitlabUrl=http://gitlab.${domain}" \
+    --set "registry.enabled=false" \
+    --set "global.kas.enabled=false" \
+    --set "gitlab-exporter.enabled=false" \
+    --set "gitlab.toolbox.enabled=false" \
+    --set "prometheus.install=false" \
+    --set "postgresql.primary.persistence.enabled=false" \
+    --set "redis.master.persistence.enabled=false" \
+    --set "minio.persistence.enabled=false"
 
   local endpoint
   endpoint=$(_gitlabInternalEndpoint)
@@ -205,18 +213,52 @@ installGitlab(){
 
   # Generate + persist a Personal Access Token for API/git operations
   _gitlabEnsurePat
-  printInfo "GitLab available at: http://gitlab.${domain}"
-  printInfo "Root credentials: $GITLAB_ROOT_USER / $root_password"
 
   # Wide-open RBAC like the source repo, so CI runners can do anything
   kubectl create clusterrolebinding gitlab-cluster-admin \
     --clusterrole=cluster-admin --group=system:serviceaccounts 2>/dev/null || true
+
+  # Register GitLab in the app registry and expose it on a dedicated port
+  _registerGitlabApp "$domain"
+  printInfo "GitLab available at: http://gitlab.${domain}"
+  printInfo "GitLab Codespaces URL: $(getAppURL gitlab 8929)"
+  printInfo "Root credentials: $GITLAB_ROOT_USER / $root_password"
 }
 
 uninstallGitlab(){
   printInfoSection "Uninstalling GitLab"
+  pkill -f "kubectl port-forward.*gitlab-webservice-default.*8929" 2>/dev/null || true
   helm uninstall gitlab -n "$GITLAB_NAMESPACE" 2>/dev/null || true
   kubectl delete namespace "$GITLAB_NAMESPACE" 2>/dev/null || true
+  if [[ -f "$APP_REGISTRY" ]]; then
+    grep -v "^gitlab|" "$APP_REGISTRY" > "${APP_REGISTRY}.tmp" 2>/dev/null || true
+    mv "${APP_REGISTRY}.tmp" "$APP_REGISTRY" 2>/dev/null || true
+  fi
+}
+
+# ----------------------------------------------------------------------
+# GitLab — app registry + Codespaces port exposure
+# ----------------------------------------------------------------------
+_registerGitlabApp() {
+  # Registers GitLab in the app registry so it appears in the greeting.
+  # On Codespaces: starts a background port-forward on port 8929 so the
+  # GitLab web UI is accessible at https://${CODESPACE_NAME}-8929.app.github.dev
+  # without relying on the nginx ingress Host-header routing.
+  local domain="$1"
+  local ingress_host="gitlab.${domain}"
+  local cs_port=8929
+
+  # Kill any stale port-forward before starting a fresh one
+  pkill -f "kubectl port-forward.*gitlab-webservice-default.*8929" 2>/dev/null || true
+  nohup kubectl port-forward -n "$GITLAB_NAMESPACE" svc/gitlab-webservice-default \
+    "${cs_port}:8080" --address 0.0.0.0 >/dev/null 2>&1 &
+  printInfo "GitLab port-forward started on :${cs_port} → gitlab-webservice-default:8080"
+
+  mkdir -p "$(dirname "$APP_REGISTRY")"
+  grep -v "^gitlab|" "$APP_REGISTRY" > "${APP_REGISTRY}.tmp" 2>/dev/null || true
+  mv "${APP_REGISTRY}.tmp" "$APP_REGISTRY" 2>/dev/null || true
+  echo "gitlab|${GITLAB_NAMESPACE}|gitlab-webservice-default|8080|${ingress_host}|${cs_port}|" >> "$APP_REGISTRY"
+  printInfo "GitLab registered in app registry (ingress: ${ingress_host}, cs-port: ${cs_port})"
 }
 
 # ----------------------------------------------------------------------
